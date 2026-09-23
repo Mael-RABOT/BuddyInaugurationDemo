@@ -3,28 +3,13 @@ package com.example.buddydemo
 import android.os.Bundle
 import android.util.Log
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.bfr.buddy.speech.shared.ITTSCallback
 import com.bfr.buddy.ui.shared.LabialExpression
@@ -53,35 +38,32 @@ class MainActivity : BuddyCompatActivity() {
 
     private fun randomSpeech(): String {
         val totalWeight = speechOptions.sumOf { it.weight.toDouble() }
-
         var random = Math.random() * totalWeight
 
         for (option in speechOptions) {
             random -= option.weight
-
             if (random <= 0) {
                 return option.text
             }
         }
-
-        // Fallback for floating-point rounding
         return speechOptions.last().text
     }
 
     companion object {
         private const val TAG = "BuddyDebug"
-        private const val DETECTION_THRESHOLD = 0.7f // 50% confidence threshold
-        private const val SPEECH_COOLDOWN_MS = 8000L // 8s cooldown between greetings
+        private const val DETECTION_THRESHOLD = 0.7f
+        private const val SPEECH_COOLDOWN_MS = 8000L
+        private const val ROTATION_SPEED_DEG_S = 90.0f
     }
 
-    private var isSdkReady by mutableStateOf(false)
-    private var areWheelsEnabled by mutableStateOf(false)
-    private var isMoving by mutableStateOf(false)
-    private var isPersonDetected by mutableStateOf(false)
-
+    private var isSdkReady = false
+    private var areWheelsEnabled = false
+    private var isMoving = false
     private var isSpeaking = false
     private var lastSpokenTime = 0L
+
     private var visionJob: Job? = null
+    private var touchSensorJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -93,22 +75,7 @@ class MainActivity : BuddyCompatActivity() {
             )
             setContent {
                 BuddyDemoTheme {
-                    Scaffold(
-                        modifier = Modifier.fillMaxSize(),
-                        containerColor = Color.Transparent
-                    ) { innerPadding ->
-                        RobotControlScreen(
-                            isSdkReady = isSdkReady,
-                            areWheelsEnabled = areWheelsEnabled,
-                            isMoving = isMoving,
-                            isPersonDetected = isPersonDetected,
-                            onSpeakClick = { speak() },
-                            onEnableWheelsClick = { enableWheels() },
-                            onMoveForwardClick = { moveForward() },
-                            onRotate360Click = { rotate360() },
-                            modifier = Modifier.padding(innerPadding)
-                        )
-                    }
+                    RobotDisplayScreen()
                 }
             }
         }
@@ -126,8 +93,39 @@ class MainActivity : BuddyCompatActivity() {
         }
         isSdkReady = true
 
-        // Start person detection loop
+        // Automatically activate wheels
+        enableWheels()
+
+        // Background services always running
         startPersonDetectionLoop()
+        startTouchSensorLoop()
+    }
+
+    private fun startTouchSensorLoop() {
+        touchSensorJob?.cancel()
+        touchSensorJob = lifecycleScope.launch(Dispatchers.Default) {
+            while (isActive) {
+                if (isSdkReady && areWheelsEnabled && !isMoving) {
+                    try {
+                        val headSensors = BuddySDK.Sensors.HeadTouchSensors()
+                        val isHeadTouched = headSensors.Top().isTouched ||
+                                headSensors.Left().isTouched ||
+                                headSensors.Right().isTouched
+
+                        if (isHeadTouched) {
+                            Log.i(TAG, "Head sensor touch detected! Triggering 360 rotation...")
+                            launch(Dispatchers.Main) {
+                                rotate360()
+                            }
+                            delay(1000) // Debounce touch events
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error reading head touch sensors: ${e.message}")
+                    }
+                }
+                delay(100)
+            }
+        }
     }
 
     private fun startPersonDetectionLoop() {
@@ -138,7 +136,6 @@ class MainActivity : BuddyCompatActivity() {
                 if (isSdkReady) {
                     try {
                         val detections: Detections? = BuddySDK.Vision.detectPerson(DETECTION_THRESHOLD)
-
                         var validPersonCount = 0
 
                         if (detections != null) {
@@ -147,7 +144,6 @@ class MainActivity : BuddyCompatActivity() {
                             val topList = detections.topPos
                             val bottomList = detections.bottomPos
 
-                            // Check if all coordinate lists are populated and match in size
                             val totalEntries = leftList?.size ?: 0
                             if (totalEntries > 0 && rightList != null && topList != null && bottomList != null) {
                                 for (i in 0 until totalEntries) {
@@ -159,26 +155,17 @@ class MainActivity : BuddyCompatActivity() {
                                     val width = right - left
                                     val height = bottom - top
 
-                                    // Filter out false/empty/zero bounding boxes
-                                    // Real detections occupy at least 5% width and 5% height of the frame
                                     if (width > 0.05f && height > 0.05f && right <= 1.0f && bottom <= 1.0f) {
                                         validPersonCount++
-                                        Log.d(TAG, "Valid person #$i box: [L:$left, R:$right, T:$top, B:$bottom] (W:$width, H:$height)")
                                     }
                                 }
                             }
                         }
 
-                        // Update UI state on Main thread
-                        val hasPerson = validPersonCount > 0
-                        if (isPersonDetected != hasPerson) {
-                            isPersonDetected = hasPerson
-                        }
-
-                        if (hasPerson) {
+                        if (validPersonCount > 0) {
                             val currentTime = System.currentTimeMillis()
                             if (!isSpeaking && (currentTime - lastSpokenTime > SPEECH_COOLDOWN_MS)) {
-                                Log.i(TAG, "Confirmed person in front ($validPersonCount detected)! Speaking...")
+                                Log.i(TAG, "Person detected ($validPersonCount). Speaking...")
                                 lastSpokenTime = currentTime
                                 launch(Dispatchers.Main) {
                                     speak()
@@ -189,7 +176,7 @@ class MainActivity : BuddyCompatActivity() {
                         Log.e(TAG, "Error during detectPerson(): ${e.message}")
                     }
                 }
-                delay(400) // Poll every 400ms to reduce CPU load on Buddy's tablet
+                delay(400)
             }
         }
     }
@@ -213,30 +200,11 @@ class MainActivity : BuddyCompatActivity() {
         })
     }
 
-    private fun moveForward() {
-        if (!areWheelsEnabled || isMoving) return
-
-        isMoving = true
-        BuddySDK.USB.moveBuddy(0.2f, 0.4f, object : IUsbCommadRsp.Stub() {
-            override fun onSuccess(s: String?) {
-                Log.i(TAG, "moveBuddy onSuccess: $s")
-                if (s == "WHEEL_MOVE_FINISHED") {
-                    isMoving = false
-                }
-            }
-
-            override fun onFailed(p0: String?) {
-                Log.e(TAG, "moveBuddy onFailed: $p0")
-                isMoving = false
-            }
-        })
-    }
-
     private fun rotate360() {
         if (!areWheelsEnabled || isMoving) return
 
         isMoving = true
-        BuddySDK.USB.rotateBuddy(50.0f, 360.0f, object : IUsbCommadRsp.Stub() {
+        BuddySDK.USB.rotateBuddy(ROTATION_SPEED_DEG_S, 360.0f, object : IUsbCommadRsp.Stub() {
             override fun onSuccess(s: String?) {
                 Log.i(TAG, "rotateBuddy onSuccess: $s")
                 if (s == "WHEEL_MOVE_FINISHED") {
@@ -278,6 +246,7 @@ class MainActivity : BuddyCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         visionJob?.cancel()
+        touchSensorJob?.cancel()
 
         if (isSdkReady) {
             try {
@@ -294,74 +263,11 @@ class MainActivity : BuddyCompatActivity() {
 }
 
 @Composable
-fun RobotControlScreen(
-    isSdkReady: Boolean,
-    areWheelsEnabled: Boolean,
-    isMoving: Boolean,
-    isPersonDetected: Boolean,
-    onSpeakClick: () -> Unit,
-    onEnableWheelsClick: () -> Unit,
-    onMoveForwardClick: () -> Unit,
-    onRotate360Click: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Box(
-        modifier = modifier.fillMaxSize()
-    ) {
-        // Fullscreen Background Image
-        Image(
-            painter = painterResource(id = R.drawable.bg_buddy),
-            contentDescription = "Background",
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize()
-        )
-
-        // Overlay UI Controls
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Text(
-                text = if (isPersonDetected) "Person in sight! \uD83D\uDC4B" else "Scanning for people...",
-                color = Color.White
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Button(
-                onClick = onSpeakClick,
-                enabled = isSdkReady
-            ) {
-                Text(text = if (isSdkReady) "Speak" else "Connecting to Buddy...")
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Button(
-                onClick = onEnableWheelsClick,
-                enabled = isSdkReady && !areWheelsEnabled
-            ) {
-                Text(text = if (areWheelsEnabled) "Wheels Enabled ✓" else "Enable Wheels")
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Button(
-                onClick = onMoveForwardClick,
-                enabled = areWheelsEnabled && !isMoving
-            ) {
-                Text(text = if (isMoving) "Moving..." else "Move Forward (40cm)")
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Button(
-                onClick = onRotate360Click,
-                enabled = areWheelsEnabled && !isMoving
-            ) {
-                Text(text = if (isMoving) "Rotating..." else "Rotate 360°")
-            }
-        }
-    }
+fun RobotDisplayScreen() {
+    Image(
+        painter = painterResource(id = R.drawable.bg_buddy),
+        contentDescription = null,
+        contentScale = ContentScale.Crop,
+        modifier = Modifier.fillMaxSize()
+    )
 }
